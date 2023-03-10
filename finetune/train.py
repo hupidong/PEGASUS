@@ -23,10 +23,12 @@ from pprint import pprint
 
 import numpy as np
 import paddle
-from datasets import load_dataset
+# from datasets import load_dataset
+from paddlenlp.datasets import load_dataset
 from paddle.io import BatchSampler, DataLoader, DistributedBatchSampler
 from tqdm import tqdm
-from utils import compute_metrics, convert_example, main_process_first
+
+from utils import compute_metrics, main_process_first, save_ckpt, print_args
 
 from paddlenlp.data import DataCollatorForSeq2Seq
 from paddlenlp.trainer.argparser import strtobool
@@ -35,7 +37,12 @@ from paddlenlp.transformers import (
     PegasusChineseTokenizer,
     PegasusForConditionalGeneration,
 )
+from paddlenlp.transformers import AutoTokenizer
 from paddlenlp.utils.log import logger
+from data_loader import convert_example_human_activity, read_file, convert_example_news, truncate_news
+
+from paddlenlp.transformers.opt.modeling import OPTForCausalLM
+import jieba
 
 
 def parse_args():
@@ -50,7 +57,7 @@ def parse_args():
     parser.add_argument("--train_file", type=str, required=False, default="data/train.json", help="Train data path.")
     parser.add_argument("--eval_file", type=str, required=False, default="data/test.json", help="Eval data path.")
     parser.add_argument(
-        "--output_dir",
+        "--save_dir",
         default="output",
         type=str,
         required=True,
@@ -61,7 +68,7 @@ def parse_args():
         default=128,
         type=int,
         help="The maximum total input sequence length after "
-        "tokenization.Sequences longer than this will be truncated, sequences shorter will be padded.",
+             "tokenization.Sequences longer than this will be truncated, sequences shorter will be padded.",
     )
     parser.add_argument(
         "--min_target_length",
@@ -74,8 +81,8 @@ def parse_args():
         default=64,
         type=int,
         help="The maximum total sequence length for target text after "
-        "tokenization. Sequences longer than this will be truncated, sequences shorter will be padded."
-        "during ``evaluate`` and ``predict``.",
+             "tokenization. Sequences longer than this will be truncated, sequences shorter will be padded."
+             "during ``evaluate`` and ``predict``.",
     )
     parser.add_argument("--learning_rate", default=1e-4, type=float, help="The initial learning rate for Adam.")
     parser.add_argument(
@@ -85,7 +92,8 @@ def parse_args():
         help="Total number of training epochs to perform.",
     )
     parser.add_argument("--logging_steps", type=int, default=100, help="Log every X updates steps.")
-    parser.add_argument("--save_steps", type=int, default=100, help="Save checkpoint every X updates steps.")
+    parser.add_argument("--save_interval", type=float, default=1, help="Save checkpoint every X epoch.")
+    parser.add_argument("--eval_interval", type=float, default=1, help="Evaluate model performance every X epoch.")
     parser.add_argument(
         "--train_batch_size",
         default=2,
@@ -120,13 +128,24 @@ def parse_args():
         "--device",
         default="gpu",
         type=str,
-        choices=["cpu", "gpu", "xpu"],
         help="The device to select to train the model, is must be cpu/gpu/xpu.",
     )
     parser.add_argument("--use_amp", default=False, type=strtobool, help="Enable mixed precision training.")
-    parser.add_argument("--scale_loss", default=2**15, type=float, help="The value of scale_loss for fp16.")
+    parser.add_argument("--scale_loss", default=2 ** 15, type=float, help="The value of scale_loss for fp16.")
     parser.add_argument("--use_SSTIA", action="store_true", help="Whether to use SSTIA.")
     parser.add_argument("--mix_ratio", default=0, type=float, help="Mixture ratio for TSDASG synthetic input.")
+    parser.add_argument("--do_lower_case", default=1, type=int, choices=[0, 1])
+    parser.add_argument("--metric_weights", type=float, default=[1.0, 0.9, 1, 1], nargs="*")
+    parser.add_argument("--init_checkpoint", type=str, default=None, help="Checkpoint to warm start from.")
+    parser.add_argument("--eval_checkpoint", type=int, choices=[0, 1], default=1)
+    parser.add_argument("--task", type=str, default="human_activity", choices=["human_activity", "news"])
+    parser.add_argument("--use_activity_name", default=True, type=strtobool,
+                        help="is use activity name for source(for human-activity)")
+    parser.add_argument("--expansion_coef", default=1.4, type=float,
+                        help="max_source_length_of_char=max_source_length*expansion_coef")
+    parser.add_argument("--head2tail", default=[3, 1], type=float, nargs='*',
+                        help="ratio of body head-to-tail truncation(for news-summary)")
+    parser.add_argument("--user_dict", type=str, default='./data/vocab/user_dict_for_jieba.txt')
     args = parser.parse_args()
     return args
 
@@ -163,11 +182,11 @@ def evaluate(model, data_loader, tokenizer, min_target_length, max_target_length
         )
         labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
         all_labels.extend(tokenizer.batch_decode(labels, skip_special_tokens=True, clean_up_tokenization_spaces=False))
-    rougel = compute_metrics(all_preds, all_labels)
+    metrics = compute_metrics(all_preds, all_labels)
     model.train()
     if use_SSTIA:
         model.use_SSTIA = True
-    return rougel
+    return metrics
 
 
 def do_train(args):
@@ -176,28 +195,63 @@ def do_train(args):
         paddle.distributed.init_parallel_env()
 
     set_seed(args)
-
-    tokenizer = PegasusChineseTokenizer.from_pretrained(args.model_name_or_path)
-    train_set = load_dataset("json", data_files=args.train_file, split="train")
-    dev_set = load_dataset("json", data_files=args.eval_file, split="train")
-    remove_columns = ["content", "title"]
-    trans_func = partial(
-        convert_example,
-        text_column="content",
-        summary_column="title",
-        tokenizer=tokenizer,
-        max_source_length=args.max_source_length,
-        max_target_length=args.max_target_length,
-    )
-    with main_process_first(desc="train dataset map pre-processing"):
-        train_set = train_set.map(trans_func, batched=True, load_from_cache_file=True, remove_columns=remove_columns)
-    with main_process_first(desc="dev dataset map pre-processing"):
-        dev_set = dev_set.map(trans_func, batched=True, load_from_cache_file=True, remove_columns=remove_columns)
-
+    # load model and tokenizer
     model = PegasusForConditionalGeneration.from_pretrained(args.model_name_or_path)
+    tokenizer = PegasusChineseTokenizer.from_pretrained(args.model_name_or_path, do_lower_case=args.do_lower_case)
     if args.use_SSTIA:
         model.use_SSTIA = True
         model.mix_ratio = args.mix_ratio
+
+    # load-from-checkpoint
+    is_from_checkpoint = False
+    if args.init_checkpoint:
+        try:
+            model_state = paddle.load(os.path.join(args.init_checkpoint, "model_state.pdparams"))
+            model.set_state_dict(model_state)
+            tokenizer = AutoTokenizer.from_pretrained(args.init_checkpoint, do_lower_case=args.do_lower_case)
+            jieba.load_userdict(args.user_dict)
+            print(f"custom vocab: {args.user_dict} loaded by jieba.")
+            is_from_checkpoint = True
+            print(f"checkpoint loaded from {args.init_checkpoint}.")
+        except Exception as e:
+            print(e.__str__())
+            print(f"\ncheckpoint load failed from {args.init_checkpoint}.")
+    if not args.do_lower_case:
+        assert is_from_checkpoint, "if do_lower_case==False, it should load model from checkpoint"
+
+    # data-loader
+    train_set = load_dataset(read_file, file=args.train_file, lazy=False)
+    dev_set = load_dataset(read_file, file=args.eval_file, lazy=False)
+    remove_columns = ["content", "title"]
+    if args.task == "human_activity":
+        trans_func = partial(
+            convert_example_human_activity,
+            text_column="content",
+            summary_column="title",
+            tokenizer=tokenizer,
+            max_source_length=args.max_source_length,
+            max_target_length=args.max_target_length,
+            expansion_coef=args.expansion_coef,
+            use_activity_name=args.use_activity_name
+        )
+    if args.task == "news":
+        trans_func = partial(
+            convert_example_news,
+            summary_column="summary",
+            tokenizer=tokenizer,
+            max_source_length=args.max_source_length,
+            max_target_length=args.max_target_length,
+            truncate_func=truncate_news,
+            expansion_coef=args.expansion_coef,
+            ration_head2tail=args.head2tail
+        )
+    with main_process_first(desc="train dataset map pre-processing"):
+        # train_set = train_set.map(trans_func, batched=False, load_from_cache_file=True, remove_columns=remove_columns)
+        train_set = train_set.map(trans_func, lazy=True)
+    with main_process_first(desc="dev dataset map pre-processing"):
+        # dev_set = dev_set.map(trans_func, batched=False, load_from_cache_file=True, remove_columns=remove_columns)
+        dev_set = dev_set.map(trans_func, lazy=True)
+
     batchify_fn = DataCollatorForSeq2Seq(tokenizer=tokenizer, model=model)
 
     train_batch_sampler = DistributedBatchSampler(train_set, batch_size=args.train_batch_size, shuffle=True)
@@ -220,6 +274,12 @@ def do_train(args):
         num_training_steps = len(train_data_loader) * args.epoch
         num_train_epochs = args.epoch
 
+    save_steps = int(len(train_data_loader) * args.save_interval)
+    eval_steps = int(len(train_data_loader) * args.eval_interval)
+    logger.debug(f"num_training_steps: {num_training_steps}, num_train_epochs: {num_train_epochs}.")
+    logger.debug(f"eval every {args.eval_interval} epoch, {eval_steps} steps.")
+    logger.debug(f"save every {args.save_interval} epoch, {save_steps} steps.")
+
     warmup = args.warmup_steps if args.warmup_steps > 0 else args.warmup_proportion
 
     lr_scheduler = LinearDecayWithWarmup(args.learning_rate, num_training_steps, warmup)
@@ -236,12 +296,34 @@ def do_train(args):
         weight_decay=args.weight_decay,
         apply_decay_param_fun=lambda x: x in decay_params,
     )
+    # debug
+    """
+    optimizer = Lion(
+        learning_rate=lr_scheduler,
+        beta1=0.9,
+        beta2=0.99,
+        parameters=model.parameters(),
+        weight_decay=args.weight_decay
+    )
+    """
 
     if args.use_amp:
         scaler = paddle.amp.GradScaler(init_loss_scaling=args.scale_loss)
     global_step = 0
-    best_rougel = 0
     tic_train = time.time()
+    best_metrics = (0, 0, 0, 0)
+    best_metrics_avg = 0
+    metric_weights = args.metric_weights
+    if is_from_checkpoint and args.eval_checkpoint:
+        metrics = evaluate(
+            model, dev_data_loader, tokenizer, args.min_target_length, args.max_target_length, args.use_SSTIA
+        )
+        metrics_avg = sum(np.array(metrics) * metric_weights / sum(metric_weights))
+        logger.info("init checkpoint: rouge1: %.4f, rouge2: %.4f, rougel: %.4f, bleu: %.4f, avg: %.4f\n" % (
+            metrics[0], metrics[1], metrics[2], metrics[3], metrics_avg))
+        best_metrics = metrics
+        best_metrics_avg = metrics_avg
+
     for epoch in range(num_train_epochs):
         for step, batch in enumerate(train_data_loader):
             global_step += 1
@@ -271,26 +353,35 @@ def do_train(args):
                     )
                 )
                 tic_train = time.time()
-            if global_step % args.save_steps == 0 or global_step == num_training_steps:
+            if global_step % save_steps == 0 or global_step == num_training_steps:
+                save_ckpt(model, tokenizer, args.save_dir, global_step)
+                logger.info("Saved step {} model.\n".format(global_step))
+            if global_step % eval_steps == 0 or global_step == num_training_steps:
                 tic_eval = time.time()
-                rougel = evaluate(
+                metrics = evaluate(
                     model, dev_data_loader, tokenizer, args.min_target_length, args.max_target_length, args.use_SSTIA
                 )
+                metrics_avg = sum(np.array(metrics) * metric_weights / sum(metric_weights))
+                logger.info(
+                    "epoch %d - step %05d: rouge1: %.4f, rouge2: %.4f, rougel: %.4f, bleu: %.4f, avg: %.4f" % (
+                        epoch, step, metrics[0], metrics[1], metrics[2], metrics[3], metrics_avg))
+                logger.info("           best_last: "
+                            "rouge1: %.4f, rouge2: %.4f, rougel: %.4f, bleu: %.4f, avg: %.4f"
+                            % (best_metrics[0], best_metrics[1], best_metrics[2], best_metrics[3], best_metrics_avg))
                 logger.info("eval done total : %s s" % (time.time() - tic_eval))
-                if paddle.distributed.get_rank() == 0 and best_rougel < rougel:
-                    best_rougel = rougel
-                    output_dir = args.output_dir
-                    if not os.path.exists(output_dir):
-                        os.makedirs(output_dir)
+                if paddle.distributed.get_rank() == 0 and metrics_avg > best_metrics_avg:
+                    best_metrics_avg = metrics_avg
+                    best_metrics = metrics
+                    if not os.path.exists(args.save_dir):
+                        os.makedirs(args.save_dir)
                     # Need better way to get inner model of DataParallel
-                    model_to_save = model._layers if isinstance(model, paddle.DataParallel) else model
-                    model_to_save.save_pretrained(output_dir)
-                    tokenizer.save_pretrained(output_dir)
-            if global_step >= num_training_steps:
+                    save_ckpt(model, tokenizer, args.save_dir, "best")
+                    logger.info(f"Saved step {global_step} model as model best.\n")
+            if global_step > num_training_steps:
                 return
 
 
 if __name__ == "__main__":
     args = parse_args()
-    pprint(args)
+    print_args(args)
     do_train(args)

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import contextlib
+import os
 
 import numpy as np
 import paddle
@@ -22,18 +23,11 @@ from paddlenlp.metrics import BLEU
 from paddlenlp.utils.log import logger
 
 
-def convert_example(example, text_column, summary_column, tokenizer, max_source_length, max_target_length):
-    """
-    Convert a example into necessary features.
-    """
-    inputs = example[text_column]
-    targets = example[summary_column]
-    model_inputs = tokenizer(
-        inputs, max_length=max_source_length, padding=False, truncation=True, return_attention_mask=True
-    )
-    labels = tokenizer(targets, max_length=max_target_length, padding=False, truncation=True)
-    model_inputs["labels"] = labels["input_ids"]
-    return model_inputs
+def print_args(args):
+    print("-----------  Configuration Arguments -----------")
+    for arg, value in sorted(vars(args).items()):
+        print("%s: %s" % (arg, value))
+    print("------------------------------------------------")
 
 
 def compute_metrics(preds, targets):
@@ -60,7 +54,7 @@ def compute_metrics(preds, targets):
     print("rouge-2:", round(rouge2, 4))
     print("rouge-L:", round(rougel, 4))
     print("BLEU-4:", round(bleu4.score(), 4))
-    return rougel
+    return rouge1, rouge2, rougel, bleu4.score()
 
 
 @contextlib.contextmanager
@@ -83,3 +77,13 @@ def main_process_first(desc="work"):
                 paddle.distributed.barrier()
     else:
         yield
+
+
+def save_ckpt(model, tokenizer, save_dir, name):
+    output_dir = os.path.join(save_dir, "model_{}".format(name))
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    # Need better way to get inner model of DataParallel
+    model_to_save = model._layers if isinstance(model, paddle.DataParallel) else model
+    model_to_save.save_pretrained(output_dir)
+    tokenizer.save_pretrained(output_dir)
