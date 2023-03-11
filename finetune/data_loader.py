@@ -171,7 +171,8 @@ def pre_tokenize_uppercase(text):
     for example:
     小鹏G3i和小鹏PX5 > 小鹏G##3##i和小鹏P##X##5
     """
-    text = re.sub('((?<=[a-zA-z])[a-zA-Z0-9])', r"##\1", text)
+    text = re.sub('((?<=[a-zA-Z])[a-zA-Z0-9])', r"##\1", text)
+    text = re.sub('((?<=[0-9])[a-zA-Z])', r"##\1", text)
     return text
 
 
