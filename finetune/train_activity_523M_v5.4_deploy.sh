@@ -1,22 +1,25 @@
 python train.py \
     --task=human_activity \
+    --text_column=activity \
+    --summary_column=summary \
     --model_name_or_path=IDEA-CCNL/Randeng-Pegasus-523M-Summary-Chinese \
-    --train_file=F:\\Work\kg\gen\human_activity\train_v4\train.jsonl \
-    --eval_file=F:\\Work\kg\gen\human_activity\train_v4\dev.jsonl \
+    --train_file=../../../../../kg/gen/human_activity/v5.4/train_for_deploy.jsonl \
+    --eval_file=../../../../../kg/gen/human_activity/v5.4/train_for_deploy.jsonl \
     --save_dir=checkpoints/human_activity/Randeng-Pegasus-523M-Summary-Chinese \
     --init_checkpoint=checkpoints/human_activity/Randeng-Pegasus-523M-Summary-Chinese/model_best \
     --max_source_length=512 \
     --max_target_length=200 \
+    --max_margin_of_activity_and_human=500 \
     --epoch=20 \
     --logging_steps=10 \
-    --save_interval=1
-    --eval_interval=1 \
-    --train_batch_size=6 \
-    --eval_batch_size=8 \
+    --save_interval=1 \
+    --eval_interval=4 \
+    --train_batch_size=5 \
+    --eval_batch_size=16 \
     --learning_rate=5e-5 \
     --warmup_proportion=0.02 \
     --weight_decay=0.01 \
     --device=gpu:0 \
-    --do_lower_case=1 \
+    --do_lower_case=0 \
     --use_activity_name=True \
     --metric_weights 1.0 0.9 1.0 1.5

@@ -42,7 +42,6 @@ from paddlenlp.utils.log import logger
 from data_loader import convert_example_human_activity, read_file, convert_example_news, truncate_news
 
 from paddlenlp.transformers.opt.modeling import OPTForCausalLM
-import jieba
 
 
 def parse_args():
@@ -145,7 +144,10 @@ def parse_args():
                         help="max_source_length_of_char=max_source_length*expansion_coef")
     parser.add_argument("--head2tail", default=[3, 1], type=float, nargs='*',
                         help="ratio of body head-to-tail truncation(for news-summary)")
-    parser.add_argument("--user_dict", type=str, default='./data/vocab/user_dict_for_jieba.txt')
+    parser.add_argument("--vocab_path", default="./data/vocab/custom", type=str)
+    parser.add_argument("--text_column", default="content", type=str, help="column name of input source")
+    parser.add_argument("--summary_column", default="title", type=str, help="column name of summary")
+    parser.add_argument("--max_margin_of_activity_and_human", default=500, type=int)
     args = parser.parse_args()
     return args
 
@@ -209,15 +211,14 @@ def do_train(args):
             model_state = paddle.load(os.path.join(args.init_checkpoint, "model_state.pdparams"))
             model.set_state_dict(model_state)
             tokenizer = AutoTokenizer.from_pretrained(args.init_checkpoint, do_lower_case=args.do_lower_case)
-            jieba.load_userdict(args.user_dict)
-            print(f"custom vocab: {args.user_dict} loaded by jieba.")
             is_from_checkpoint = True
-            print(f"checkpoint loaded from {args.init_checkpoint}.")
+            print(f"Success load checkpoint from {args.init_checkpoint}.")
         except Exception as e:
             print(e.__str__())
-            print(f"\ncheckpoint load failed from {args.init_checkpoint}.")
-    if not args.do_lower_case:
-        assert is_from_checkpoint, "if do_lower_case==False, it should load model from checkpoint"
+            print(f"\nFailed load checkpoint from {args.init_checkpoint}.")
+    if not args.do_lower_case and not is_from_checkpoint:
+        tokenizer = PegasusChineseTokenizer.from_pretrained(args.vocab_path, do_lower_case=args.do_lower_case)
+        logger.info(f"load custom vacab from {os.path.realpath(args.vocab_path)}.")
 
     # data-loader
     train_set = load_dataset(read_file, file=args.train_file, lazy=False)
@@ -226,13 +227,14 @@ def do_train(args):
     if args.task == "human_activity":
         trans_func = partial(
             convert_example_human_activity,
-            text_column="content",
-            summary_column="title",
+            text_column=args.text_column,
+            summary_column=args.summary_column,
             tokenizer=tokenizer,
             max_source_length=args.max_source_length,
             max_target_length=args.max_target_length,
             expansion_coef=args.expansion_coef,
-            use_activity_name=args.use_activity_name
+            use_activity_name=args.use_activity_name,
+            max_margin_of_activity_and_human=args.max_margin_of_activity_and_human
         )
     if args.task == "news":
         trans_func = partial(

@@ -1,12 +1,11 @@
 import json
-import re, os
-import string
+import re
+import unicodedata
 
 import jieba
-import unicodedata
 from paddlenlp.transformers import AutoTokenizer
 
-from finetune.datext import get_human_and_activity_context, cut_chinese_sent
+from datext import get_human_and_activity_context, cut_chinese_sent
 
 
 def convert_example_human_activity(example, text_column, summary_column, tokenizer, max_source_length,
@@ -14,17 +13,18 @@ def convert_example_human_activity(example, text_column, summary_column, tokeniz
     """
     Convert a example into necessary features.
     """
-    do_lower_case = tokenizer.do_lower_case
+    max_margin_of_activity_and_human = kwargs.get("max_margin_of_activity_and_human", 300)
     example[text_column] = create_source_human_activity(example,
                                                         max_seq_len_char=int(max_source_length * expansion_coef),
                                                         title_len=0,
                                                         sep_token=tokenizer.sep_token,
                                                         use_activity_name=kwargs.get("use_activity_name", True),
-                                                        do_lower_case=do_lower_case)
+                                                        activity_column=text_column,
+                                                        max_margin_of_activity_and_human=max_margin_of_activity_and_human)
     inputs = example[text_column]
     targets = example[summary_column]
-    if not do_lower_case:
-        targets = pre_tokenize_uppercase(targets)
+    inputs = unicodedata.normalize("NFKC", inputs)
+    targets = unicodedata.normalize("NFKC", targets)
 
     model_inputs = tokenizer(
         inputs, max_length=max_source_length, padding=False, truncation=True, return_attention_mask=True
@@ -39,18 +39,15 @@ def convert_example_news(example, summary_column, tokenizer, max_source_length,
     """
     Convert a example into necessary features.
     """
-    do_lower_case = tokenizer.do_lower_case
     ratio_head2tail = kwargs.get("ratio_head2tail", [2, 1])
     inputs = create_source_news(example,
                                 max_char_len=int(max_source_length * expansion_coef),
                                 sep_token=tokenizer.sep_token,
                                 truncate_func=truncate_func,
-                                ratio_head2tail=ratio_head2tail,
-                                do_lower_case=do_lower_case)
-
+                                ratio_head2tail=ratio_head2tail)
     targets = example[summary_column]
-    if not do_lower_case:
-        targets = pre_tokenize_uppercase(targets)
+    inputs = unicodedata.normalize("NFKC", inputs)
+    targets = unicodedata.normalize("NFKC", targets)
 
     model_inputs = tokenizer(
         inputs, max_length=max_source_length, padding=False, truncation=True, return_attention_mask=True
@@ -62,48 +59,49 @@ def convert_example_news(example, summary_column, tokenizer, max_source_length,
 
 def create_source_human_activity(example, max_seq_len_char=512, title_len=128, sep_token="[SEP]", **kwargs):
     use_activity_name = kwargs.get("use_activity_name", True)
-    do_lower_case = kwargs.get("do_lower_case", True)
+    activity_column = kwargs.get("activity_column", "content")
+    max_margin_of_activity_and_human = kwargs.get("max_margin_of_activity_and_human", 400)
     empty = "null"
     source_human = example.get("human_name", "")
     assert source_human, "目标人物不能为空"
-    prompt = "描述" + source_human + "参加活动的概要："
+    prompt = "生成" + source_human + "的活动摘要："
+
+    source_activity = example[activity_column]
+
+    if use_activity_name:
+        max_seq_len_char_context = max_seq_len_char - len(prompt) - len(source_activity) - title_len
+    else:
+        max_seq_len_char_context = max_seq_len_char - len(prompt) - title_len
 
     if "context" not in example:
         if "text" not in example:
             source_context = ""
         else:
             text = example["text"].split("###")[-1]
-            source_context = get_human_and_activity_context(content=text,
-                                                            human_name=source_human,
-                                                            activity_span=example["content"],
-                                                            offset=40)
+            if len(unicodedata.normalize("NFKC", text)) <= max_seq_len_char_context:
+                source_context = text
+            else:
+                source_context = get_human_and_activity_context(content=text,
+                                                                human_name=source_human,
+                                                                activity_span=example[activity_column],
+                                                                offset=40,
+                                                                max_seq_len_char=max_seq_len_char_context,
+                                                                max_margin_of_activity_and_human=max_margin_of_activity_and_human)
             example["context"] = source_context
     else:
         source_context = example.get("context", "")
+    source_context = source_context[0: max_seq_len_char_context]
     if not source_context:
         source_context = empty
 
-    source_content = example["content"]
-
     if use_activity_name:
-        source_context = source_context[0: max_seq_len_char - len(prompt) - len(example["content"])
-                                           - title_len]
-        # 英文字符特殊处理
-        if not do_lower_case:
-            source_context = pre_tokenize_uppercase(source_context)
-            source_content = pre_tokenize_uppercase(source_content)
-        source = prompt + sep_token + source_content + sep_token + source_context
+        source = prompt + sep_token + source_activity + sep_token + source_context
     else:
-        source_context = source_context[0: max_seq_len_char - len(prompt) - title_len]
-        # 英文字符特殊处理
-        if not do_lower_case:
-            source_context = pre_tokenize_uppercase(source_context)
         source = prompt + sep_token + source_context
     return source
 
 
 def create_source_news(example, max_char_len=1024, sep_token="[SEP]", truncate_func=None, **kwargs):
-    do_lower_case = kwargs.get("do_lower_case", True)
     empty = "null"
     source_title = example.get("title", "")
     if not source_title:
@@ -116,10 +114,6 @@ def create_source_news(example, max_char_len=1024, sep_token="[SEP]", truncate_f
         ratio_head2tail = kwargs.get("ratio_head2tail", [2, 1])
         source_body = truncate_func(source_body, max_seq_len=max_char_len - len(source_title) - 15,
                                     ratio_head2tail=ratio_head2tail)
-    # 英文字符特殊处理
-    if not do_lower_case:
-        source_title = pre_tokenize_uppercase(source_title)
-        source_body = pre_tokenize_uppercase(source_body)
     source = "完成摘要:" + sep_token + "标题是:" + source_title + sep_token + "正文是:" + source_body
     return source
 

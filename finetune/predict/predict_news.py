@@ -1,26 +1,31 @@
 import math
 import random
+import unicodedata
 
 from paddlenlp import Taskflow
 import sys, os
-import jieba
 
 from tqdm import tqdm
 
-sys.path.append("../../")
-from finetune.data_loader import create_source_news, truncate_news
+sys.path.append(os.path.realpath(os.path.dirname(__file__)+"/../"))
+from data_loader import create_source_news, truncate_news
 
-sys.path.append(r"F:\\Work\Learning\awesome-nlp")
-sys.path.append("/mnt/f/Work/Learning/awesome-nlp")
-from dautils.utils import load_jsonl_data, save2jsonl
-from dautils.datext import cut_text_backward, FIRST_SEP
+from utils import load_jsonl_data, save2jsonl
+from datext import cut_text_backward, sent_end_punctuation, FIRST_SEP, SECOND_SEP, cut_chinese_sent
 
 
 def summary_post_process(summary):
+    punctuation = sent_end_punctuation + ".、"
     summary = summary.replace("()", "").replace("（）", "")
-    summary, _ = cut_text_backward(summary, second_sep=FIRST_SEP)
-    if summary[-1] not in FIRST_SEP:
-        summary += "。"
+    summary, _ = cut_text_backward(summary, first_sep=sent_end_punctuation, second_sep=FIRST_SEP)
+    if summary[-1] not in sent_end_punctuation:
+        if unicodedata.normalize("NFKC", summary)[-1] not in (SECOND_SEP + ".、"):
+            summary += "。"
+        else:
+            summary = summary[0:-1] + "。"
+    sents = cut_chinese_sent(summary)
+    if len(sents)>=2 and "扫描二维码" in sents[-1]:
+        summary = "".join(sents[0:-1])
     return summary
 
 
@@ -32,11 +37,9 @@ if __name__ == "__main__":
     save_path = r"F:\\Work\kg\gen\news_summary\train_v1\test_pred_by_pegasus_base.jsonl"
 
     data_path = r"F:\\Work\kg\ie\fin_events\fin_events_20230118_pred_by_pegasus.jsonl"
-    save_path = r"F:\\Work\kg\ie\fin_events\fin_events_20230118_pred_by_pegasus_v4.jsonl"
+    save_path = r"F:\\Work\kg\ie\fin_events\fin_events_20230118_pred_by_pegasus_v6.jsonl"
 
     task_path_unimo = r"F:\\Work\Learning\awesome-nlp\gen\unimo-text\checkpoints\news_summary\unimo-text-1.0-large\model_best"
-    # task_path_unimo = r"F:\\Work\Learning\awesome-nlp\gen\unimo-text\checkpoints\news_summary\unimo-text-1.0-summary\model_best"
-    # task_path_pegasus = r"F:\\Work\Learning\awesome-nlp\gen\pegasus\finetune\checkpoints\news_summary\Randeng-Pegasus-523M-Summary-Chinese\model_best"
     task_path_pegasus = r"F:\\Work\Learning\awesome-nlp\gen\pegasus\finetune\checkpoints\news_summary" \
                         r"\Randeng-Pegasus-238M-Summary-Chinese\model_best"
 
@@ -49,26 +52,22 @@ if __name__ == "__main__":
     print(f"model_path_unimo: {task_path_unimo}")
     print(f"model_path_pegasus: {task_path_pegasus}")
 
-    uppercase_file = r"F:\\Work\Learning\awesome-nlp\gen\pegasus\finetune\data\vocab\uppercase.txt"
-    jieba.load_userdict(uppercase_file)
-
     examples = load_jsonl_data(data_path)
     print(f"example-num: {len(examples)}")
     # predict-parameters
-    batch_size = 2
-    device = 1
+    batch_size = 16
+    device = 0
     expansion_coef = 1.5
     max_token_len = 1024
     max_seq_len = int(max_token_len * expansion_coef)
-    ratio_head2tail = [3,1]
-    max_gen_length = 90
+    ratio_head2tail = [3, 1]
+    max_gen_length = 115
     length_penalty = 0.7
     num_beams = 4
     decode_strategy = "beam_search"
     use_fp16_decoding = True
     use_faster = False
     use_fast_tokenizer = True
-    do_lower_case = False
     is_shuffle = False
     if is_shuffle:
         random.shuffle(examples)
@@ -84,8 +83,7 @@ if __name__ == "__main__":
                                       use_fp16_decoding=use_fp16_decoding,
                                       device_id=device,
                                       use_faster=use_faster,
-                                      use_fast_tokenizer=use_fast_tokenizer,
-                                      do_lower_case=do_lower_case)
+                                      use_fast_tokenizer=use_fast_tokenizer)
     if do_unimo:
         summarizer_unimo = Taskflow("text_summarization",
                                     task_path=task_path_unimo,
@@ -98,16 +96,15 @@ if __name__ == "__main__":
                                     use_fp16_decoding=use_fp16_decoding,
                                     device_id=device,
                                     use_faster=use_faster,
-                                    use_fast_tokenizer=use_fast_tokenizer,
-                                    do_lower_case=do_lower_case)
+                                    use_fast_tokenizer=use_fast_tokenizer)
     batch_num = math.ceil(len(examples) / batch_size)
     batches = [examples[i * batch_size: (i + 1) * batch_size] for i in range(batch_num)]
     results = []
     for batch in tqdm(batches):
         source_batch = [create_source_news(example,
                                            max_char_len=max_seq_len,
-                                           truncate_func=truncate_news,
-                                           do_lower_case=do_lower_case) for example in batch]
+                                           truncate_func=truncate_news) for example in batch]
+        source_batch = [unicodedata.normalize("NFKC", source) for source in source_batch]
         if do_unimo:
             result_batch_unimo = summarizer_unimo(source_batch)
         if do_pegasus:

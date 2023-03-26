@@ -57,7 +57,7 @@ class TextSummarizationTask(Task):
         self._batch_size = kwargs.get("batch_size", 1)
         self._output_scores = kwargs.get("output_scores", False)
         self._model_type = None
-        self._construct_tokenizer(model, do_lower_case=kwargs.get("do_lower_case", False))
+        self._construct_tokenizer(model)
         self._construct_model(model)
         # Hypter-parameter during generating.
         self._max_length = kwargs.get("max_length", 128)
@@ -93,11 +93,9 @@ class TextSummarizationTask(Task):
         """
         if self._custom_model:
             self._tokenizer = AutoTokenizer.from_pretrained(self._task_path, from_hf_hub=self.from_hf_hub,
-                                                            use_fast=self._use_fast_tokenizer,
-                                                            do_lower_case=kwargs.get("do_lower_case", False))
+                                                            use_fast=self._use_fast_tokenizer)
         else:
-            self._tokenizer = AutoTokenizer.from_pretrained(model, use_fast=self._use_fast_tokenizer,
-                                                            do_lower_case=kwargs.get("do_lower_case", False))
+            self._tokenizer = AutoTokenizer.from_pretrained(model, use_fast=self._use_fast_tokenizer)
 
     def _preprocess(self, inputs):
         """

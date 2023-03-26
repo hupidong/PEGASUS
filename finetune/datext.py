@@ -2,10 +2,9 @@ import re
 import json
 
 whitespace = '\t\n\r\v\f'
-punctuation = """!！。?？"""
-FIRST_SEP = punctuation + whitespace
-SECOND_SEP = ' ,，；;'
-
+sent_end_punctuation = """!！。?？"""
+FIRST_SEP = sent_end_punctuation + whitespace
+SECOND_SEP = """ ,，；;"""
 
 def cut_chinese_sent(para):
     """
@@ -20,7 +19,10 @@ def cut_chinese_sent(para):
     return para.split("\n")
 
 
-def get_human_and_activity_context(content, human_name, activity_span, offset=20):
+def get_human_and_activity_context(content, human_name, activity_span, offset=20, **kwargs):
+    max_seq_len_char = kwargs.get("max_seq_len_char", 512)
+    max_margin_of_activity_and_human = kwargs.get("max_margin_of_activity_and_human", 400)
+
     human_spans = re.finditer(human_name, content)
     activity_spans = re.finditer(re.escape(activity_span), content)
 
@@ -41,54 +43,101 @@ def get_human_and_activity_context(content, human_name, activity_span, offset=20
 
     distance_min = 10000000
     try:
-        human_target = list(human_spans)[0]
-        activity_target = list(activity_spans)[0]
+        human_spans = list(human_spans)
+        activity_spans = list(activity_spans)
+        human_target = human_spans[0]
+        activity_target = activity_spans[0]
     except:
         print(json.dumps({"content": content, "activity": activity_span, "human": human_name}, ensure_ascii=False,
                          indent=4))
         return content
 
-    for activity_span in activity_spans:
-        activity_start = activity_span.span()[0]
-        activity_end = activity_span.span()[1]
-        for human_span in human_spans:
-            human_start = human_span.span()[0]
-            human_end = human_span.span()[1]
-            if activity_start <= human_start <= activity_end and activity_start <= human_end <= activity_end:
-                distance = 0
-            else:
-                distance_left = min(abs(human_start - activity_start), abs(human_start - activity_end))
-                distance_right = min(abs(human_end - activity_start), abs(human_end - activity_end))
-                distance = min(distance_left, distance_right)
-
-            if distance < distance_min:
-                distance_min = distance
-                human_target = human_span
-                activity_target = activity_span
-
     """
+    search sentence index of target activity and human
     """
-    human_sentence_idx = None
     activity_sentence_idx = None
+    human_sentence_idx = None
+    activity_start = activity_target.span()[0]
+    activity_end = activity_target.span()[1]
 
+    # search index of target activity
     for i, sentence_span in enumerate(sentence_split_spans):
-        human_start = human_target.span()[0]
-        human_end = human_target.span()[1]
-        if sentence_span[0] <= human_start <= sentence_span[1] and sentence_span[0] <= human_end <= sentence_span[1]:
-            human_sentence_idx = i
-            break
-
-    for i, sentence_span in enumerate(sentence_split_spans):
-        activity_start = activity_target.span()[0]
-        activity_end = activity_target.span()[1]
         if sentence_span[0] <= activity_start <= sentence_span[1] \
                 and sentence_span[0] <= activity_end <= sentence_span[1]:
             activity_sentence_idx = i
             break
 
+    # search index of target human
+    FLAG = False
+    for i, sentence_span in enumerate(sentence_split_spans):
+        for span in human_spans:
+            human_start = span.span()[0]
+            human_end = span.span()[1]
+            if not (sentence_span[0] <= human_start <= sentence_span[1] and sentence_span[0] <= human_end <=
+                    sentence_span[1]):
+                continue
+
+            if activity_start <= human_start <= activity_end and activity_start <= human_end <= activity_end:
+                if activity_sentence_idx:
+                    human_sentence_idx = activity_sentence_idx
+                    human_target = span
+                    FLAG=True
+                    break
+            elif human_start >= activity_end:
+                human_sentence_idx = i
+                human_target = span
+                FLAG = True
+                break
+        if FLAG:
+            break
+
+
+    if human_sentence_idx and activity_sentence_idx is None:
+        span_activity = activity_target.span()
+        span_human_sentence = re.finditer(re.escape(sentence_splits[human_sentence_idx]), content)
+        span_human = list(span_human_sentence)[0].span()
+        margin = 0
+        if int(sum(human_target.span()) / 2) - span_activity[1] > max_margin_of_activity_and_human:
+            margin = int(sum(human_target.span()) / 2) - span_activity[1]
+        if int(sum(human_target.span()) / 2) - span_activity[0] < -max_margin_of_activity_and_human:
+            margin = int(sum(human_target.span()) / 2) - span_activity[0]
+        if margin > max_margin_of_activity_and_human or margin < -max_margin_of_activity_and_human:
+            start = span_activity[0]
+            end = span_activity[1]
+            print(f"margin of human and activity is too big {margin}, more than {max_margin_of_activity_and_human}.")
+            print(json.dumps({"content": content, "activity": activity_span, "human": human_name}, ensure_ascii=False,
+                             indent=4))
+        else:
+            start = min(span_human[0], span_activity[0])
+            end = max(span_human[1], span_human[1])
+        start = start - offset if start - offset >= 0 else 0
+        end = end + offset
+        text = content[start:end]
+        # cut
+        text_cut, index = cut_text_forward(text)
+        if index > offset:
+            text_cut = text
+        text = text_cut
+        text_cut, index = cut_text_backward(text)
+        if index < -offset:
+            text_cut = text
+        return text_cut
+
     if human_sentence_idx is None or activity_sentence_idx is None:
-        start = min(human_target.span()[0], activity_target.span()[0])
-        end = max(human_target.span()[1], activity_target.span()[1])
+        margin = 0
+        if int(sum(human_target.span()) / 2) - activity_target.span()[1] > max_margin_of_activity_and_human:
+            margin = int(sum(human_target.span()) / 2) - activity_target.span()[1]
+        if int(sum(human_target.span()) / 2) - activity_target.span()[0] < -max_margin_of_activity_and_human:
+            margin = int(sum(human_target.span()) / 2) - activity_target.span()[0]
+        if margin > max_margin_of_activity_and_human or margin < -max_margin_of_activity_and_human:
+            start = activity_target.span()[0]
+            end = activity_target.span()[1]
+            print(f"margin of human and activity is too big {margin}, more than {max_margin_of_activity_and_human}.")
+            print(json.dumps({"content": content, "activity": activity_span, "human": human_name}, ensure_ascii=False,
+                             indent=4))
+        else:
+            start = min(human_target.span()[0], activity_target.span()[0])
+            end = max(human_target.span()[1], activity_target.span()[1])
         start = start - offset if start - offset >= 0 else 0
         end = end + offset
         text = content[start:end]
@@ -104,10 +153,46 @@ def get_human_and_activity_context(content, human_name, activity_span, offset=20
 
     if human_sentence_idx == activity_sentence_idx:
         return sentence_splits[human_sentence_idx]
-    elif human_sentence_idx > activity_sentence_idx:
-        return sentence_splits[activity_sentence_idx] + sentence_splits[human_sentence_idx]
-    else:
-        return sentence_splits[human_sentence_idx] + sentence_splits[activity_sentence_idx]
+    if human_sentence_idx > activity_sentence_idx:
+        margin = 0
+        if int(sum(human_target.span()) / 2) - activity_target.span()[1] > max_margin_of_activity_and_human:
+            margin = int(sum(human_target.span()) / 2) - activity_target.span()[1]
+        if int(sum(human_target.span()) / 2) - activity_target.span()[0] < -max_margin_of_activity_and_human:
+            margin = int(sum(human_target.span()) / 2) - activity_target.span()[0]
+        if margin > max_margin_of_activity_and_human or margin < -max_margin_of_activity_and_human:
+            print(f"margin of human and activity is too big {margin}, more than {max_margin_of_activity_and_human}.")
+            print(json.dumps({"content": content, "activity": activity_span, "human": human_name}, ensure_ascii=False,
+                             indent=4))
+            return sentence_splits[activity_sentence_idx]
+        else:
+            max_seq_len = max_seq_len_char - (activity_target.span()[1] - activity_target.span()[0]) - \
+                          (human_target.span()[1] - human_target.span()[0])
+            add = ""
+            range_list = list(range(activity_sentence_idx + 1, human_sentence_idx))
+            range_list.reverse()
+            for idx in range_list:
+                if len(add + sentence_splits[idx]) < max_seq_len:
+                    add = sentence_splits[idx] + add
+            return sentence_splits[activity_sentence_idx] + add + sentence_splits[human_sentence_idx]
+    if human_sentence_idx < activity_sentence_idx:
+        margin = 0
+        if int(sum(human_target.span()) / 2) - activity_target.span()[1] > max_margin_of_activity_and_human:
+            margin = int(sum(human_target.span()) / 2) - activity_target.span()[1]
+        if int(sum(human_target.span()) / 2) - activity_target.span()[0] < -max_margin_of_activity_and_human:
+            margin = int(sum(human_target.span()) / 2) - activity_target.span()[0]
+        if margin > max_margin_of_activity_and_human or margin < -max_margin_of_activity_and_human:
+            print(f"margin of human and activity is too big, more than {max_margin_of_activity_and_human}.")
+            print(json.dumps({"content": content, "activity": activity_span, "human": human_name}, ensure_ascii=False,
+                             indent=4))
+            return sentence_splits[activity_sentence_idx]
+        else:
+            max_seq_len = max_seq_len_char - (activity_target.span()[1] - activity_target.span()[0]) - \
+                          (human_target.span()[1] - human_target.span()[0])
+            add = ""
+            for idx in range(human_sentence_idx + 1, activity_sentence_idx):
+                if len(add + sentence_splits[idx]) < max_seq_len:
+                    add += sentence_splits[idx]
+            return sentence_splits[human_sentence_idx] + add + sentence_splits[activity_sentence_idx]
 
 
 def cut_text_backward(text, first_sep=FIRST_SEP, second_sep=SECOND_SEP):

@@ -13,7 +13,9 @@
 # limitations under the License.
 
 import contextlib
+import json
 import os
+from typing import List
 
 import numpy as np
 import paddle
@@ -87,3 +89,30 @@ def save_ckpt(model, tokenizer, save_dir, name):
     model_to_save = model._layers if isinstance(model, paddle.DataParallel) else model
     model_to_save.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
+
+
+def load_jsonl_data(data_path, nrows=-1):
+    with open(data_path, 'r', encoding='utf8') as f:
+        if nrows == -1:
+            lines = f.readlines()
+        else:
+            lines = []
+            nlines = 0
+            for line in f:
+                if nlines >= nrows:
+                    break
+                lines.append(line)
+                nlines += 1
+        lines = [json.loads(line) for line in lines]
+    return lines
+
+
+def save2json(obj, save_path, indent=None):
+    with open(save_path, 'w', encoding='utf8') as f:
+        json.dump(obj, f, ensure_ascii=False, indent=indent)
+
+
+def save2jsonl(obj_list: List, save_path, indent=None):
+    with open(save_path, 'w', encoding='utf8') as f:
+        for obj in obj_list:
+            f.write(json.dumps(obj, ensure_ascii=False, indent=indent) + "\n")
