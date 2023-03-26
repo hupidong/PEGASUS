@@ -1,3 +1,4 @@
+import json
 import math
 import re
 import unicodedata
@@ -44,12 +45,12 @@ if __name__ == "__main__":
 
     task_path_unimo = r"../../../../../learning/awesome-nlp/gen/unimo-text/checkpoints/human_activity/unimo-text-1.0-large/model_best"
     task_path_pegasus = r"../../../../../learning/awesome-nlp/gen/pegasus/finetune/checkpoints/human_activity" \
-                        r"/Randeng-Pegasus-523M-Summary-Chinese/model_503"
+                        r"/Randeng-Pegasus-523M-Summary-Chinese/release_v3"
     #task_path_pegasus = r"../../../../../Learning/awesome-nlp/gen/pegasus/finetune/checkpoints/human_activity" \
     #                    r"/Randeng-Pegasus-238M-Summary-Chinese/model_best"
 
-    data_path = r"../../../../../kg/gen/human_activity/待生成数据_20230308.json"
-    save_path = r"../../../../../kg/gen/human_activity/待生成数据_20230308_pred_by_pegasus_v5.4_503.json"
+    data_path = r"../../../../../kg/gen/human_activity/offline-inference/v3/person_event_待生成1_20230324.json"
+    save_path = r"../../../../../kg/gen/human_activity/offline-inference/v3/person_event_待生成1_20230324_by_pegasus.json"
 
     print(f"model_path_unimo: {os.path.realpath(task_path_unimo)}")
     print(f"model_path_pegasus: {os.path.realpath(task_path_pegasus)}")
@@ -64,7 +65,7 @@ if __name__ == "__main__":
     print(f"example-num: {len(examples)}")
 
     # predict-parameters
-    batch_size = 8
+    batch_size = 18
     device = 0
     title_len = 0
     expansion_coef = 1.5
@@ -79,6 +80,7 @@ if __name__ == "__main__":
     use_faster = False
     use_fast_tokenizer = True
     use_activity_name = True
+    activity_column = "event_name"
     is_shuffle = False
     if is_shuffle:
         random.shuffle(examples)
@@ -112,6 +114,7 @@ if __name__ == "__main__":
     batch_num = math.ceil(len(examples) / batch_size)
     batches = [examples[i * batch_size: (i + 1) * batch_size] for i in range(batch_num)]
     results = []
+    f = open(save_path, 'a', encoding='utf8')
     for idx, batch in enumerate(tqdm(batches)):
         source_batch = [create_source_human_activity(example, max_seq_len_char=max_seq_len, title_len=title_len,
                                                      use_activity_name=use_activity_name,
@@ -134,4 +137,8 @@ if __name__ == "__main__":
                 example["pegasus_raw"] = result_batch_pegasus[idx]
                 example['pegasus'] = result_batch_pegasus_post[idx]
         results.extend(batch)
-        save2jsonl(results, save_path)
+        for example in batch:
+            f.write(json.dumps(example, ensure_ascii=False)+"\n")
+    f.close()
+    save2jsonl(results, save_path)
+
